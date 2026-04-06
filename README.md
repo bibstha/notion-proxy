@@ -73,3 +73,17 @@ Block IDs are included in `read-page` output (e.g. `[block:uuid]`), so you can r
 - **macOS + Firefox only** for auto cookie refresh (reads `~/Library/Application Support/Firefox/Profiles/*/cookies.sqlite`)
 - Cookies expire when your Firefox session expires — just log in again
 - Write access depends on your actual Notion permissions (guest with read-only can only read)
+
+## Platform support
+
+Auto cookie refresh currently only works on macOS. On other platforms, use the `.env` fallback.
+
+Firefox stores `cookies.sqlite` at different paths per OS:
+
+| OS | Path |
+|----|------|
+| macOS | `~/Library/Application Support/Firefox/Profiles/*/cookies.sqlite` |
+| Linux | `~/.mozilla/firefox/*/cookies.sqlite` |
+| Windows | `%APPDATA%\Mozilla\Firefox\Profiles\*\cookies.sqlite` |
+
+Adding cross-platform support is a small change to `findFirefoxProfile()` in `server.mjs` — just detect `process.platform` and use the appropriate path.
