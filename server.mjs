@@ -519,20 +519,23 @@ server.tool(
 
 server.tool(
   "add-block",
-  "Add a new text block to the bottom of a Notion page.",
+  "Add a new text block to a Notion page. Appends to the bottom by default, or inserts after a specific block.",
   {
     page: z.string().describe("Notion page URL or ID"),
     text: z.string().describe("Text content for the new block"),
     type: z.enum(["text", "header", "sub_header", "sub_sub_header", "bulleted_list", "numbered_list", "to_do", "quote", "code"])
       .default("text")
       .describe("Block type (default: text)"),
+    after: z.string().optional().describe("Block ID to insert after. Omit to append at the bottom."),
   },
-  async ({ page, text, type }) => {
+  async ({ page, text, type, after }) => {
     try {
       const pageId = parsePageId(page);
       const spaceId = await getSpaceId(pageId);
       if (!spaceId) throw new Error("Could not determine spaceId for page");
       const newBlockId = crypto.randomUUID();
+      const listAfterArgs = { id: newBlockId };
+      if (after) listAfterArgs.after = parsePageId(after);
       const res = await fetch(`${API_BASE}/saveTransactions`, {
         method: "POST",
         headers: headers(spaceId),
@@ -561,7 +564,7 @@ server.tool(
                 pointer: { table: "block", id: pageId, spaceId },
                 path: ["content"],
                 command: "listAfter",
-                args: { id: newBlockId },
+                args: listAfterArgs,
               },
             ],
           }],
