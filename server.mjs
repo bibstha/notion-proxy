@@ -250,21 +250,38 @@ function extractText(blocks, pageId) {
   return renderBlock(root, blocks).join("\n");
 }
 
-// Fetch page chunk (returns discussions + comments + users)
-async function loadPageChunk(pageId) {
-  const res = await fetch(`${API_BASE}/loadPageChunk`, {
-    method: "POST",
-    headers: headers(),
-    body: JSON.stringify({
-      pageId,
-      limit: 100,
-      cursor: { stack: [] },
-      chunkNumber: 0,
-      verticalColumns: false,
-    }),
-  });
-  if (!res.ok) throw new Error(`loadPageChunk failed: ${res.status} ${await res.text()}`);
-  return res.json();
+// Fetch all page chunks (paginates through cursor to get all discussions/comments)
+async function loadAllPageChunks(pageId) {
+  let cursor = { stack: [] };
+  let chunk = 0;
+  let merged = { block: {}, discussion: {}, comment: {}, notion_user: {} };
+
+  while (true) {
+    const res = await fetch(`${API_BASE}/loadPageChunk`, {
+      method: "POST",
+      headers: headers(),
+      body: JSON.stringify({
+        pageId,
+        limit: 100,
+        cursor,
+        chunkNumber: chunk,
+        verticalColumns: false,
+      }),
+    });
+    if (!res.ok) throw new Error(`loadPageChunk failed: ${res.status} ${await res.text()}`);
+    const data = await res.json();
+
+    for (const table of ["block", "discussion", "comment", "notion_user"]) {
+      Object.assign(merged[table], data.recordMap?.[table] || {});
+    }
+
+    if (!data.cursor?.stack?.length) break;
+    cursor = data.cursor;
+    chunk++;
+    if (chunk > 20) break; // safety limit
+  }
+
+  return { recordMap: merged };
 }
 
 // Format discussions into readable text
@@ -443,7 +460,7 @@ server.tool(
   async ({ page }) => {
     try {
       const pageId = parsePageId(page);
-      const data = await loadPageChunk(pageId);
+      const data = await loadAllPageChunks(pageId);
       const text = formatDiscussions(data.recordMap);
       return { content: [{ type: "text", text }] };
     } catch (e) {
