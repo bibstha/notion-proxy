@@ -1,8 +1,8 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
-import { readFileSync, copyFileSync, existsSync, readdirSync } from "fs";
-import { resolve, dirname, join } from "path";
+import { readFileSync, copyFileSync, existsSync, readdirSync, statSync } from "fs";
+import { resolve, dirname, join, basename, extname } from "path";
 import { fileURLToPath } from "url";
 import { createRequire } from "module";
 
@@ -339,19 +339,13 @@ async function addComment(pageId, text, discussionId) {
           id: crypto.randomUUID(),
           spaceId,
           operations: [
-            // Register discussion on the parent block
-            {
-              pointer: { table: "block", id: pageId, spaceId },
-              path: ["discussions"],
-              command: "listAfter",
-              args: { id: newDiscId },
-            },
             {
               pointer: { table: "discussion", id: newDiscId, spaceId },
               path: [],
               command: "set",
               args: {
                 id: newDiscId,
+                version: 1,
                 parent_id: pageId,
                 parent_table: "block",
                 resolved: false,
@@ -364,6 +358,7 @@ async function addComment(pageId, text, discussionId) {
               command: "set",
               args: {
                 id: commentId,
+                version: 1,
                 parent_id: newDiscId,
                 parent_table: "discussion",
                 text: [[text]],
@@ -380,6 +375,12 @@ async function addComment(pageId, text, discussionId) {
               path: ["comments"],
               command: "listAfter",
               args: { id: commentId },
+            },
+            {
+              pointer: { table: "block", id: pageId, spaceId },
+              path: ["discussions"],
+              command: "listAfter",
+              args: { id: newDiscId },
             },
           ],
         }],
@@ -404,6 +405,7 @@ async function addComment(pageId, text, discussionId) {
               command: "set",
               args: {
                 id: commentId,
+                version: 1,
                 parent_id: discussionId,
                 parent_table: "discussion",
                 text: [[text]],
@@ -428,6 +430,44 @@ async function addComment(pageId, text, discussionId) {
     if (!res.ok) throw new Error(`saveTransactions failed: ${res.status} ${await res.text()}`);
     return { discussionId, commentId };
   }
+}
+
+// Upload a local file to Notion's S3 via getUploadFileUrl. Returns the URL to use as image source.
+async function uploadFile(filePath, parentBlockId, spaceId) {
+  if (!existsSync(filePath)) throw new Error(`File not found: ${filePath}`);
+  const stats = statSync(filePath);
+  const name = basename(filePath);
+  const ext = extname(filePath).toLowerCase().slice(1);
+  const mimeMap = {
+    png: "image/png", jpg: "image/jpeg", jpeg: "image/jpeg", gif: "image/gif",
+    webp: "image/webp", svg: "image/svg+xml", bmp: "image/bmp",
+  };
+  const contentType = mimeMap[ext] || "application/octet-stream";
+
+  const initRes = await fetch(`${API_BASE}/getUploadFileUrl`, {
+    method: "POST",
+    headers: headers(spaceId),
+    body: JSON.stringify({
+      bucket: "secure",
+      name,
+      contentType,
+      contentLength: stats.size,
+      record: { table: "block", id: parentBlockId, spaceId },
+      supportExtraHeaders: true,
+    }),
+  });
+  if (!initRes.ok) throw new Error(`getUploadFileUrl failed: ${initRes.status} ${await initRes.text()}`);
+  const { url, signedPutUrl, signedGetUrl, fields } = await initRes.json();
+
+  const fileBuf = readFileSync(filePath);
+  const putRes = await fetch(signedPutUrl, {
+    method: "PUT",
+    headers: { "Content-Type": contentType, ...(fields || {}) },
+    body: fileBuf,
+  });
+  if (!putRes.ok) throw new Error(`S3 PUT failed: ${putRes.status} ${await putRes.text()}`);
+
+  return { url, signedGetUrl: signedGetUrl || url };
 }
 
 // --- MCP Server ---
@@ -604,8 +644,12 @@ server.tool(
   async ({ block_id }) => {
     try {
       const blockId = parsePageId(block_id);
-      const spaceId = await getSpaceId(blockId);
-      if (!spaceId) throw new Error("Could not determine spaceId for block");
+      const sync = await syncBlocks([blockId]);
+      const blockVal = sync.recordMap?.block?.[blockId]?.value?.value;
+      if (!blockVal) throw new Error("Block not found");
+      const parentId = blockVal.parent_id;
+      const spaceId = blockVal.space_id;
+      if (!spaceId || !parentId) throw new Error("Could not determine parent/space for block");
       const res = await fetch(`${API_BASE}/saveTransactions`, {
         method: "POST",
         headers: headers(spaceId),
@@ -621,12 +665,146 @@ server.tool(
                 command: "update",
                 args: { alive: false },
               },
+              {
+                pointer: { table: "block", id: parentId, spaceId },
+                path: ["content"],
+                command: "listRemove",
+                args: { id: blockId },
+              },
             ],
           }],
         }),
       });
       if (!res.ok) throw new Error(`saveTransactions failed: ${res.status} ${await res.text()}`);
       return { content: [{ type: "text", text: "Block deleted successfully." }] };
+    } catch (e) {
+      return { content: [{ type: "text", text: `Error: ${e.message}` }], isError: true };
+    }
+  }
+);
+
+server.tool(
+  "add-image",
+  "Add an image block to a Notion page. Source can be an external URL (http/https) or a local file path (uploaded to Notion's storage).",
+  {
+    page: z.string().describe("Notion page URL or ID"),
+    source: z.string().describe("Image URL (http/https) or absolute local file path"),
+    after: z.string().optional().describe("Block ID to insert after. Omit to append at the bottom."),
+  },
+  async ({ page, source, after }) => {
+    try {
+      const pageId = parsePageId(page);
+      const spaceId = await getSpaceId(pageId);
+      if (!spaceId) throw new Error("Could not determine spaceId for page");
+      const newBlockId = crypto.randomUUID();
+
+      let displaySource;
+      if (/^https?:\/\//i.test(source)) {
+        displaySource = source;
+      } else {
+        const { url } = await uploadFile(source, newBlockId, spaceId);
+        displaySource = url;
+      }
+
+      const listAfterArgs = { id: newBlockId };
+      if (after) listAfterArgs.after = parsePageId(after);
+
+      const res = await fetch(`${API_BASE}/saveTransactions`, {
+        method: "POST",
+        headers: headers(spaceId),
+        body: JSON.stringify({
+          requestId: crypto.randomUUID(),
+          transactions: [{
+            id: crypto.randomUUID(),
+            spaceId,
+            operations: [
+              {
+                pointer: { table: "block", id: newBlockId, spaceId },
+                path: [],
+                command: "set",
+                args: {
+                  type: "image",
+                  id: newBlockId,
+                  version: 1,
+                  parent_id: pageId,
+                  parent_table: "block",
+                  alive: true,
+                  properties: { source: [[displaySource]] },
+                  format: { display_source: displaySource },
+                  space_id: spaceId,
+                },
+              },
+              {
+                pointer: { table: "block", id: pageId, spaceId },
+                path: ["content"],
+                command: "listAfter",
+                args: listAfterArgs,
+              },
+            ],
+          }],
+        }),
+      });
+      if (!res.ok) throw new Error(`saveTransactions failed: ${res.status} ${await res.text()}`);
+      return { content: [{ type: "text", text: `Image added successfully. Block ID: ${newBlockId}` }] };
+    } catch (e) {
+      return { content: [{ type: "text", text: `Error: ${e.message}` }], isError: true };
+    }
+  }
+);
+
+server.tool(
+  "create-page",
+  "Create a new child page under a Notion page.",
+  {
+    parent: z.string().describe("Parent Notion page URL or ID"),
+    title: z.string().describe("Title of the new page"),
+    after: z.string().optional().describe("Block ID to insert after. Omit to append at the bottom."),
+  },
+  async ({ parent, title, after }) => {
+    try {
+      const parentId = parsePageId(parent);
+      const spaceId = await getSpaceId(parentId);
+      if (!spaceId) throw new Error("Could not determine spaceId for parent page");
+      const newPageId = crypto.randomUUID();
+      const listAfterArgs = { id: newPageId };
+      if (after) listAfterArgs.after = parsePageId(after);
+
+      const res = await fetch(`${API_BASE}/saveTransactions`, {
+        method: "POST",
+        headers: headers(spaceId),
+        body: JSON.stringify({
+          requestId: crypto.randomUUID(),
+          transactions: [{
+            id: crypto.randomUUID(),
+            spaceId,
+            operations: [
+              {
+                pointer: { table: "block", id: newPageId, spaceId },
+                path: [],
+                command: "set",
+                args: {
+                  type: "page",
+                  id: newPageId,
+                  version: 1,
+                  parent_id: parentId,
+                  parent_table: "block",
+                  alive: true,
+                  properties: { title: [[title]] },
+                  space_id: spaceId,
+                },
+              },
+              {
+                pointer: { table: "block", id: parentId, spaceId },
+                path: ["content"],
+                command: "listAfter",
+                args: listAfterArgs,
+              },
+            ],
+          }],
+        }),
+      });
+      if (!res.ok) throw new Error(`saveTransactions failed: ${res.status} ${await res.text()}`);
+      return { content: [{ type: "text", text: `Page created successfully. Page ID: ${newPageId}\nURL: ${NOTION_BASE}/${newPageId.replace(/-/g, "")}` }] };
     } catch (e) {
       return { content: [{ type: "text", text: `Error: ${e.message}` }], isError: true };
     }

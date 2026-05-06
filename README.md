@@ -19,6 +19,8 @@ This proxy solves that by using your browser session cookies directly, giving yo
 - **edit-block** — Update any text block's content
 - **add-block** — Append new blocks to a page
 - **delete-block** — Remove blocks from a page
+- **add-image** — Add an image (external URL or local file upload)
+- **create-page** — Create a child page
 
 ## Setup
 
