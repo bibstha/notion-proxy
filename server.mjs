@@ -625,7 +625,13 @@ server.tool(
       const listAfterArgs = { id: newBlockId };
       if (after) listAfterArgs.after = parsePageId(after);
       const properties = { title: [[text]] };
-      if (type === "code") properties.language = [[normalizeLanguage(language)]];
+      let format;
+      if (type === "code") {
+        const lang = normalizeLanguage(language);
+        properties.language = [[lang]];
+        // Mermaid blocks default to split view; show the rendered diagram instead
+        if (lang === "Mermaid") format = { code_preview_format: "preview" };
+      }
       const res = await fetch(`${API_BASE}/saveTransactions`, {
         method: "POST",
         headers: headers(spaceId),
@@ -647,6 +653,7 @@ server.tool(
                   parent_table: "block",
                   alive: true,
                   properties,
+                  ...(format && { format }),
                   space_id: spaceId,
                 },
               },
