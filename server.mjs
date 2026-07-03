@@ -176,6 +176,21 @@ async function loadPage(pageId) {
   return blocks;
 }
 
+// Notion expects canonical language names on code blocks (e.g. "JavaScript", "Plain Text")
+const LANGUAGE_NAMES = {
+  "plain text": "Plain Text", plaintext: "Plain Text", text: "Plain Text",
+  javascript: "JavaScript", js: "JavaScript", typescript: "TypeScript", ts: "TypeScript",
+  html: "HTML", css: "CSS", json: "JSON", yaml: "YAML", sql: "SQL", xml: "XML",
+  graphql: "GraphQL", php: "PHP", cpp: "C++", "c++": "C++", csharp: "C#", "c#": "C#",
+  "objective-c": "Objective-C", shell: "Shell", bash: "Shell", sh: "Shell", zsh: "Shell",
+};
+
+function normalizeLanguage(lang) {
+  if (!lang) return "Plain Text";
+  const key = lang.trim().toLowerCase();
+  return LANGUAGE_NAMES[key] || key.charAt(0).toUpperCase() + key.slice(1);
+}
+
 // Render a block and its children as markdown, preserving document order
 function renderBlock(block, blocks, depth = 0) {
   const lines = [];
@@ -211,9 +226,11 @@ function renderBlock(block, blocks, depth = 0) {
     case "toggle":
       lines.push(`${indent}<toggle> ${text}${bid}`);
       break;
-    case "code":
-      lines.push(`\`\`\`${bid}\n${text}\n\`\`\``);
+    case "code": {
+      const lang = block.properties?.language?.[0]?.[0];
+      lines.push(`\`\`\`${lang ? lang.toLowerCase().replace(/ /g, "") : ""}${bid}\n${text}\n\`\`\``);
       break;
+    }
     case "quote":
       lines.push(`> ${text}${bid}`);
       break;
@@ -223,6 +240,18 @@ function renderBlock(block, blocks, depth = 0) {
     case "callout":
       lines.push(`> ${text}${bid}`);
       break;
+    case "table": {
+      const cols = block.format?.table_block_column_order || [];
+      lines.push(`${indent}<table columns: ${cols.join(", ")}>${bid}`);
+      break;
+    }
+    case "table_row": {
+      const cols = blocks[block.parent_id]?.format?.table_block_column_order
+        || Object.keys(block.properties || {});
+      const cells = cols.map((c) => (block.properties?.[c] || []).map((seg) => seg[0]).join(""));
+      lines.push(`${indent}| ${cells.join(" | ")} |${bid}`);
+      break;
+    }
     case "column_list":
     case "column":
       break; // just recurse into children
@@ -535,12 +564,13 @@ server.tool(
 
 server.tool(
   "edit-block",
-  "Edit a text block on a Notion page. Updates the block's text content.",
+  "Edit a text block on a Notion page. Updates the block's text content. For table row cells, pass the column ID (shown by read-page in <table columns: ...>) as property.",
   {
     block_id: z.string().describe("Block ID (UUID) to edit"),
     text: z.string().describe("New text content for the block"),
+    property: z.string().optional().describe('Property key to set (default: "title"). For table rows, use a column ID.'),
   },
-  async ({ block_id, text }) => {
+  async ({ block_id, text, property }) => {
     try {
       const blockId = parsePageId(block_id);
       const spaceId = await getSpaceId(blockId);
@@ -557,7 +587,7 @@ server.tool(
               operations: [
                 {
                   pointer: { table: "block", id: blockId, spaceId },
-                  path: ["properties", "title"],
+                  path: ["properties", property || "title"],
                   command: "set",
                   args: [[text]],
                 },
@@ -583,9 +613,10 @@ server.tool(
     type: z.enum(["text", "header", "sub_header", "sub_sub_header", "bulleted_list", "numbered_list", "to_do", "quote", "code"])
       .default("text")
       .describe("Block type (default: text)"),
+    language: z.string().optional().describe('Code language for type "code", e.g. "mermaid", "python" (default: Plain Text)'),
     after: z.string().optional().describe("Block ID to insert after. Omit to append at the bottom."),
   },
-  async ({ page, text, type, after }) => {
+  async ({ page, text, type, language, after }) => {
     try {
       const pageId = parsePageId(page);
       const spaceId = await getSpaceId(pageId);
@@ -593,6 +624,8 @@ server.tool(
       const newBlockId = crypto.randomUUID();
       const listAfterArgs = { id: newBlockId };
       if (after) listAfterArgs.after = parsePageId(after);
+      const properties = { title: [[text]] };
+      if (type === "code") properties.language = [[normalizeLanguage(language)]];
       const res = await fetch(`${API_BASE}/saveTransactions`, {
         method: "POST",
         headers: headers(spaceId),
@@ -613,7 +646,7 @@ server.tool(
                   parent_id: pageId,
                   parent_table: "block",
                   alive: true,
-                  properties: { title: [[text]] },
+                  properties,
                   space_id: spaceId,
                 },
               },
