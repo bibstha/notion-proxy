@@ -1,91 +1,84 @@
 # notion-proxy
 
-An MCP server that proxies Notion's internal API using your browser cookies. This lets Claude Code (or any MCP client) read and write Notion pages where you're a **guest** — something the official Notion API and Notion MCP integration cannot do.
+Read and edit Notion pages as a **guest**, using your browser session. A non-interactive CLI, plus a stdio MCP server for AI clients.
 
-## Why?
+The official Notion API and Notion MCP integration only work in workspaces where you can install an integration. notion-proxy calls Notion's internal API with your logged-in browser cookies instead, so it can do anything you can do in the browser, including on pages in someone else's workspace.
 
-The official Notion API only works with pages in workspaces where you have an integration installed. If you're a guest on someone else's workspace, you can't:
+## Usage
 
-- Use the Notion API (no integration access)
-- Use the official Notion MCP plugin (requires OAuth to a workspace you don't own)
-
-This proxy solves that by using your browser session cookies directly, giving you the same access you have in the browser.
-
-## Features
-
-- **read-page** — Read page content as markdown (with block IDs for editing)
-- **read-comments** — Read all discussions/comments with authors and timestamps
-- **add-comment** — Create new discussions or reply to existing ones
-- **edit-block** — Update any text block's content
-- **add-block** — Append new blocks to a page
-- **delete-block** — Remove blocks from a page
-- **add-image** — Add an image (external URL or local file upload)
-- **create-page** — Create a child page
-
-## Setup
-
-### 1. Install dependencies
+Requires [Bun](https://bun.sh). Nothing to install; run it straight from GitHub:
 
 ```bash
-npm install
+bunx github:kdm1jkm/notion-proxy help
+bunx github:kdm1jkm/notion-proxy read-page https://www.notion.so/My-Page-0123456789abcdef0123456789abcdef
 ```
 
-### 2. Cookie authentication
+`help` prints everything needed to use the tool: commands, arguments, authentication, output, and exit status. It is written to be enough on its own, for a person or for an AI agent given only the command `bunx github:kdm1jkm/notion-proxy help`.
 
-The server automatically reads cookies from your **Firefox** browser's cookie store. Just be logged into Notion in Firefox — no manual cookie export needed.
+| Command | Does |
+|---|---|
+| `read-page <page>` | Print a page as Markdown, each block tagged with `[block:<id>]` |
+| `read-comments <page>` | Print discussions and comments |
+| `add-comment <page> --text <text> [--discussion-id <id>]` | Start a discussion, or reply to one |
+| `add-block <page> --text <text> [--type <type>] [--language <lang>] [--after <block>]` | Add a block |
+| `edit-block <block> --text <text> [--property <key>]` | Replace a block's text, or a table cell |
+| `delete-block <block>` | Delete a block |
+| `add-image <page> <source> [--after <block>]` | Add an image from a URL or a local file |
+| `create-page <parent> --title <title> [--after <block>]` | Create a child page |
+| `mcp` | Run as a stdio MCP server |
 
-Cookies are cached for 60 seconds and re-read from Firefox's `cookies.sqlite` on each refresh, so session renewals are picked up automatically.
+Conventions:
 
-**Fallback:** If Firefox isn't available, create a `.env` file:
+- Every command does one thing and exits. Nothing is asked interactively.
+- `--json` prints results, and errors, as JSON.
+- `--text -` reads the text from standard input.
+- Results go to standard output, errors to standard error.
+- Exit status: `0` success, `1` Notion, authentication, or network error, `2` usage error.
 
-```
-NOTION_COOKIE=<full cookie header string from browser devtools>
-```
+Run `help <command>` for a command's options, output, and examples.
 
-### 3. Register as a global MCP server
+### Pinning a version
 
-Add to `~/.claude.json` under `mcpServers`:
+`bunx github:kdm1jkm/notion-proxy` runs the default branch. Pin a tag or commit with `bunx github:kdm1jkm/notion-proxy#<tag>`.
+
+## Authentication
+
+Cookies are read from Firefox's cookie store, so being logged in to notion.so in Firefox is enough. The store is re-read at most once a minute, so session renewals are picked up.
+
+| OS | Firefox profiles |
+|----|------|
+| macOS | `~/Library/Application Support/Firefox/Profiles/` |
+| Linux | `~/.mozilla/firefox/` |
+| Windows | `%APPDATA%\Mozilla\Firefox\Profiles\` |
+
+Without Firefox, set `NOTION_COOKIE` to the `Cookie` header of a logged-in notion.so request (browser devtools > Network). Put it in the environment, or in a `.env` file in the current directory (see `.env.example`).
+
+Write access is whatever your Notion account has: a read-only guest can only read.
+
+## MCP server
+
+`mcp` serves every command as an MCP tool with the same name. Tool arguments use the argument and option names in snake_case, for example `page`, `block_id`, `discussion_id`.
+
+Add it to an MCP client, for example in `~/.claude.json`:
 
 ```json
 {
   "mcpServers": {
     "notion-proxy": {
-      "command": "node",
-      "args": ["/path/to/notion-proxy/server.mjs"],
-      "type": "stdio"
+      "type": "stdio",
+      "command": "bunx",
+      "args": ["github:kdm1jkm/notion-proxy", "mcp"]
     }
   }
 }
 ```
 
-Restart Claude Code. The `notion-proxy` tools will be available in every project.
+## Development
 
-## Usage
-
-Once configured, ask Claude Code to interact with any Notion page by URL:
-
-```
-Read this page: https://www.notion.so/My-Page-abc123...
+```bash
+bun install          # type-checking tools only; there are no runtime dependencies
+bun run check        # tsc --noEmit
+bun bin/notion-proxy.ts help
 ```
 
-Block IDs are included in `read-page` output (e.g. `[block:uuid]`), so you can reference specific blocks for editing or commenting.
-
-## Limitations
-
-- **macOS + Firefox only** for auto cookie refresh (reads `~/Library/Application Support/Firefox/Profiles/*/cookies.sqlite`)
-- Cookies expire when your Firefox session expires — just log in again
-- Write access depends on your actual Notion permissions (guest with read-only can only read)
-
-## Platform support
-
-Auto cookie refresh currently only works on macOS. On other platforms, use the `.env` fallback.
-
-Firefox stores `cookies.sqlite` at different paths per OS:
-
-| OS | Path |
-|----|------|
-| macOS | `~/Library/Application Support/Firefox/Profiles/*/cookies.sqlite` |
-| Linux | `~/.mozilla/firefox/*/cookies.sqlite` |
-| Windows | `%APPDATA%\Mozilla\Firefox\Profiles\*\cookies.sqlite` |
-
-Adding cross-platform support is a small change to `findFirefoxProfile()` in `server.mjs` — just detect `process.platform` and use the appropriate path.
+Commands are defined once in `src/commands.ts`. The CLI parser (`src/args.ts`), help text (`src/help.ts`), and MCP tool list (`src/mcp.ts`) are all generated from that definition. Notion API access lives in `src/notion.ts`.

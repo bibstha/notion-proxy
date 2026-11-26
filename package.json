@@ -1,21 +1,24 @@
 {
   "name": "notion-proxy",
-  "version": "1.0.0",
-  "description": "",
-  "main": "server.mjs",
+  "version": "2.0.0",
+  "description": "Read and edit Notion pages as a guest, using your browser session. CLI and stdio MCP server.",
+  "type": "module",
   "bin": {
-    "notion-proxy": "./server.mjs"
+    "notion-proxy": "./bin/notion-proxy.ts"
   },
+  "files": [
+    "bin",
+    "src"
+  ],
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "check": "tsc --noEmit"
   },
-  "keywords": [],
-  "author": "",
+  "engines": {
+    "bun": ">=1.1"
+  },
   "license": "ISC",
-  "type": "commonjs",
-  "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.29.0",
-    "better-sqlite3": "^12.8.0",
-    "pi-mcp-adapter": "^2.2.2"
+  "devDependencies": {
+    "@types/bun": "^1.4.5",
+    "typescript": "^7.0.2"
   }
 }
